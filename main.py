@@ -2,6 +2,7 @@ import streamlit as st
 import uuid
 import requests
 import json
+from datetime import datetime
 
 # Use the URL of your Cloud Run service
 AGENT_URL = f"https://adk-default-service-name-188869078388.us-central1.run.app"
@@ -9,24 +10,82 @@ AGENT_URL = f"https://adk-default-service-name-188869078388.us-central1.run.app"
 # --- 1. SET UP PAGE CONFIGURATION ---
 st.set_page_config(page_title="Prompt Writer Agent", layout="wide")
 
+# --- 2. SESSION MANAGEMENT (MULTI-CONVERSATION) ---
+# Ensure a current session id exists (used for the backend as well)
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-    # create backend session once per Streamlit session
-    requests.post(f"{AGENT_URL}/apps/prompt_specialist/users/bhakris/sessions/{st.session_state.session_id}")
+    requests.post(
+        f"{AGENT_URL}/apps/prompt_specialist/users/bhakris/sessions/{st.session_state.session_id}"
+    )
 
-# --- 2. INITIALIZE SESSION STATE ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Hold all conversations in-memory for this user
+if "session_histories" not in st.session_state:
+    st.session_state.session_histories = {
+        st.session_state.session_id: []
+    }
+
+if "session_meta" not in st.session_state:
+    st.session_state.session_meta = {}
+
+if st.session_state.session_id not in st.session_state.session_meta:
+    st.session_state.session_meta[st.session_state.session_id] = {
+        "title": "New chat",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+
+# Convenience alias pointing at the current session's messages
+st.session_state.messages = st.session_state.session_histories.setdefault(
+    st.session_state.session_id, []
+)
+
+
+def _format_session_label(sid: str) -> str:
+    meta = st.session_state.session_meta.get(sid, {})
+    title = meta.get("title") or "New chat"
+    created_at = meta.get("created_at")
+    if created_at:
+        return f"{title} – {created_at}"
+    return title
+
 
 # --- 3. SIDEBAR CONTROLS ---
 with st.sidebar:
     st.title("Conversation Management")
+
+    # New conversation (creates a brand‑new session)
     if st.button("Start New Session"):
-        st.session_state.messages = []
-        st.session_state.session_id = str(uuid.uuid4())
-        requests.post(f"{AGENT_URL}/apps/prompt_specialist/users/bhakris/sessions/{st.session_state.session_id}")
+        new_id = str(uuid.uuid4())
+        st.session_state.session_id = new_id
+        st.session_state.session_histories[new_id] = []
+        st.session_state.session_meta[new_id] = {
+            "title": "New chat",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        requests.post(
+            f"{AGENT_URL}/apps/prompt_specialist/users/bhakris/sessions/{new_id}"
+        )
         st.rerun()
+
     st.divider()
+
+    # Existing conversations: behave like ChatGPT's left‑hand session list
+    all_session_ids = list(st.session_state.session_histories.keys())
+    if all_session_ids:
+        current_index = all_session_ids.index(st.session_state.session_id)
+        selected_session_id = st.radio(
+            "Your conversations",
+            options=all_session_ids,
+            format_func=_format_session_label,
+            index=current_index,
+        )
+
+        if selected_session_id != st.session_state.session_id:
+            # Switch to a different stored conversation
+            st.session_state.session_id = selected_session_id
+            st.session_state.messages = st.session_state.session_histories[
+                selected_session_id
+            ]
+            st.rerun()
 
 # --- 4. BACKEND INTEGRATION ---
 def call_google_adk_agent(user_input, session_id):
@@ -96,6 +155,15 @@ for message in st.session_state.messages:
 
 # React to user input
 if prompt := st.chat_input("How can I help you today?"):
+    # If this is the first user turn for this session, use it to name the chat
+    meta = st.session_state.session_meta.get(st.session_state.session_id, {})
+    if not meta.get("title") or meta.get("title") == "New chat":
+        short_title = prompt.strip().split("\n", 1)[0][:60]
+        if len(prompt.strip().split("\n", 1)[0]) > 60:
+            short_title += "..."
+        meta["title"] = short_title or "New chat"
+        st.session_state.session_meta[st.session_state.session_id] = meta
+
     # Display user message
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
